@@ -1,10 +1,14 @@
 import logging
 import os
+import uuid
+
 from pathlib import Path
 import platform
 import subprocess
 import sys
 import webbrowser
+
+from PIL import Image, ImageFilter
 
 # FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH 
 plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
@@ -14,10 +18,10 @@ from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Sign
     pyqtSignal
 from PyQt5.QtGui import QCursor, QColor, QFont
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-                             QTableWidgetItem, QHeaderView, QSizePolicy)
+                             QTableWidgetItem, QHeaderView, QSizePolicy, QCheckBox, QFrame)
 from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentIcon as FIF,
                             Action, RoundMenu, InfoBar, InfoBarPosition,
-                            FluentWindow, BodyLabel, MessageBox)
+                            FluentWindow, BodyLabel, MessageBox, SpinBox)
 
 from bk_asr.BcutASR import BcutASR
 from bk_asr.JianYingASR import JianYingASR
@@ -34,16 +38,42 @@ class WorkerSignals(QObject):
     finished = Signal(str, str)
     errno = Signal(str, str)
 
+def img_resize(img_path:str,tar_width:int,tar_height:int,radius:int=15,padding:float=0.1):
+    with Image.open(img_path) as image:
+        if image.width/image.height<=tar_width/tar_height:
+            back_size = (tar_width, int(tar_width * image.height / image.width))
+            fore_size = (int(tar_height*(1.0-padding*2) * image.width / image.height), int(tar_height*(1.0-padding*2)))
+            back_image = image.resize(back_size).filter(ImageFilter.GaussianBlur(radius=radius))
+            fore_image = image.resize(fore_size).convert("RGBA")
+            back_image = back_image.crop(
+                (0, (back_image.height - tar_height) / 2, tar_width, (back_image.height - tar_height) / 2 + tar_height))
+        else:
+            back_size = (int(tar_height * image.width / image.height), tar_height)
+            if int(tar_width * image.height / image.width)>tar_height*(1.0-padding*2):
+                fore_size = (int(tar_width * tar_height*(1.0-padding*2)/(tar_width * image.height / image.width)), int(tar_height*(1.0-padding*2)))
+            else:
+                fore_size = (int(tar_width), int(tar_width* image.height / image.width))
+            back_image = image.resize(back_size).filter(ImageFilter.GaussianBlur(radius=radius))
+            fore_image = image.resize(fore_size).convert("RGBA")
+            back_image = back_image.crop(
+                ((back_image.width - tar_width) / 2,0 ,(back_image.width - tar_width) / 2 + tar_width,tar_height))
+        fill_x = int((tar_width - fore_image.width) / 2)
+        fill_y = int((tar_height - fore_image.height) / 2)
+        back_image.paste(fore_image, ( fill_x,fill_y), fore_image)
+
+        resize_file = img_path.rsplit(".", 1)[0] + '_resize_rad_' + str(radius)+"_"+str(uuid.uuid4())[:8] + ".png"
+        back_image.save(resize_file)
+        return resize_file
 
 class ASRWorker(QRunnable):
     """ASR处理工作线程"""
-    def __init__(self, file_path, asr_engine, export_format):
+    def __init__(self, file_path, asr_engine, export_format,ui_self):
         super().__init__()
         self.file_path = file_path
         self.asr_engine = asr_engine
         self.export_format = export_format
         self.signals = WorkerSignals()
-
+        self.ui_self=ui_self
         self.audio_path = None
 
     @Slot()
@@ -92,6 +122,17 @@ class ASRWorker(QRunnable):
             save_path = self.file_path.rsplit(".", 1)[0] + "." + save_ext
             with open(save_path, "w", encoding="utf-8") as f:
                 f.write(result_text)
+
+            #生成视频
+            if self.ui_self.video_checkbox.isChecked():
+                logging.info(f"开始视频合成: {self.file_path},img_file:{self.ui_self.img_file}")
+                temp_video = self.file_path.rsplit(".", 1)[0] + ".mp4"
+                if self.ui_self.img_file is None:
+                    self.ui_self.img_file=""
+                if not audio2video(self.ui_self.img_file,self.audio_path,self.ui_self.video_par_s_combo.currentText(),self.ui_self.video_par_r_spin.value(),float(self.ui_self.video_par_p_spin.value()/100), temp_video):
+                    raise Exception("视频合成视频失败，确保安装ffmpeg")
+                logging.info(f"完成视频合成: {self.file_path}")
+
             self.signals.finished.emit(self.file_path, result_text)
         except Exception as e:
             logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
@@ -120,19 +161,67 @@ class UpdateCheckerThread(QThread):
         except Exception as e:
             pass
 
+class MyLineEdit(LineEdit):
+    def __init__(self,thatself):
+        super().__init__()
+        self.setAcceptDrops(True)  # 设置可以接受拖动
+        self.thatself=thatself
+        self.filetype = 'media'
+    def dragEnterEvent(self, event):
+        """拖拽进入事件"""
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if self.filetype=='image':
+            supported_formats = ('.png', '.jpg','jpeg')
+            files = [u.toLocalFile() for u in event.mimeData().urls()]
+            for file in files:
+                if os.path.isdir(file):
+                    return
+                elif file.lower().endswith(supported_formats):
+                    self.thatself.img_file = file
+                    self.setPlaceholderText(str(file))
+                    self.setToolTip(str(file))
+        else:
+            supported_formats = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma',  # 音频格式
+                                 '.mp4', '.avi', '.mov', '.ts', '.mkv', '.wmv', '.flv', '.webm', '.rmvb')  # 视频格式
+            files = [u.toLocalFile() for u in event.mimeData().urls()]
+            for file in files:
+                if os.path.isdir(file):
+                    for root, dirs, files_in_dir in os.walk(file):
+                        for f in files_in_dir:
+                            if f.lower().endswith(supported_formats):
+                                self.thatself.add_file_to_table(os.path.join(root, f))
+                elif file.lower().endswith(supported_formats):
+                    self.thatself.add_file_to_table(file)
+            self.thatself.update_start_button_state()
 
 class ASRWidget(QWidget):
     """ASR处理界面"""
 
     def __init__(self):
         super().__init__()
+        self.img_input = None
+        self.img_file = None
+        self.video_par_s_combo = None
+        self.video_par_r_spin = None
+        self.video_par_v_combo = None
+        self.video_par_frame = None
+        self.video_checkbox = None
+        self.combo_box = None
+        self.format_combo = None
         self.init_ui()
-        self.max_threads = 3  # 设置最大线程数
+        self.max_threads = os.cpu_count()-1  # 设置最大线程数
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(self.max_threads)
         self.processing_queue = []
         self.workers = {}  # 维护文件路径到worker的映射
 
+    def set_img_file(self,file):
+        self.img_file=file
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -157,9 +246,79 @@ class ASRWidget(QWidget):
         format_layout.addWidget(self.format_combo)
         layout.addLayout(format_layout)
 
+        # 是否生成视频选项
+        video_check_layout = QHBoxLayout()
+        video_check_label = BodyLabel("图片生成视频:", self)
+        video_check_label.setFixedWidth(90)
+        self.video_checkbox = QCheckBox()
+        self.video_checkbox.setChecked(True)
+        self.video_checkbox.stateChanged.connect(self.video_checkbox_state_changed)
+        video_check_layout.addWidget(video_check_label)
+        video_check_layout.addWidget(self.video_checkbox)
+        layout.addLayout(video_check_layout)
+
+        #音频生成视频的参数
+        self.video_par_frame = QFrame()
+        video_par_layout=QVBoxLayout()
+        video_par_v_layout = QHBoxLayout()
+        # video_par_v_label = BodyLabel("视频流:", self)
+        # video_par_v_label.setFixedWidth(70)
+        # self.video_par_v_combo = ComboBox(self)
+        # self.video_par_v_combo.addItems(['默认空图片', '添加图片'])
+        # video_par_v_layout.addWidget(video_par_v_label)
+        # video_par_v_layout.addWidget(self.video_par_v_combo)
+
+        video_par_r_label = BodyLabel("帧率:", self)
+        video_par_r_label.setFixedWidth(70)
+        self.video_par_r_spin = SpinBox(self)
+        # self.video_par_r_spin.setFixedHeight(35)
+        self.video_par_r_spin.setRange(1,60)
+        self.video_par_r_spin.setValue(30)
+        self.video_par_r_spin.setSingleStep(10)
+        video_par_v_layout.addWidget(video_par_r_label)
+        video_par_v_layout.addWidget(self.video_par_r_spin)
+
+        video_par_s_label = BodyLabel("分辨率:", self)
+        video_par_s_label.setFixedWidth(70)
+        self.video_par_s_combo = ComboBox(self)
+        self.video_par_s_combo.addItems(['640x360','852x480', '1280x720','1920x1080','3840x2160'])
+        self.video_par_s_combo.setCurrentIndex(2)
+        video_par_v_layout.addWidget(video_par_s_label)
+        video_par_v_layout.addWidget(self.video_par_s_combo)
+
+        video_par_layout.addLayout(video_par_v_layout)
+        # 图片文件选择区域
+        img_layout = QHBoxLayout()
+        self.img_input = MyLineEdit(self)
+        self.img_input.setPlaceholderText("拖拽图片文件到这里.为空时，会优先使用同名图片文件。")
+        self.img_input.setToolTip("拖拽图片文件到这里。为空时，会优先使用同名图片文件。")
+        self.img_input.setReadOnly(True)
+        self.img_input.filetype='image'
+        self.img_button = PushButton("选择图片文件", self)
+        self.img_button.clicked.connect(self.select_img_file)
+        img_layout.addWidget(self.img_input)
+        img_layout.addWidget(self.img_button)
+
+        video_par_p_label = BodyLabel("字幕预留高度(%):", self)
+        video_par_p_label.setToolTip('使用图片时生效，视频上下均会空出该区域')
+        video_par_p_label.setFixedWidth(120)
+        self.video_par_p_spin = SpinBox(self)
+        # self.video_par_r_spin.setFixedHeight(35)
+        self.video_par_p_spin.setRange(0, 30)
+        self.video_par_p_spin.setValue(12)
+        self.video_par_p_spin.setSingleStep(5)
+        img_layout.addWidget(video_par_p_label)
+        img_layout.addWidget(self.video_par_p_spin)
+
+        video_par_layout.addLayout(img_layout)
+
+        self.video_par_frame.setLayout(video_par_layout)
+        layout.addWidget(self.video_par_frame)
+        # self.video_par_frame.hide()
+
         # 文件选择区域
         file_layout = QHBoxLayout()
-        self.file_input = LineEdit(self)
+        self.file_input = MyLineEdit(self)
         self.file_input.setPlaceholderText("拖拽文件或文件夹到这里")
         self.file_input.setReadOnly(True)
         self.file_button = PushButton("选择文件", self)
@@ -167,6 +326,7 @@ class ASRWidget(QWidget):
         file_layout.addWidget(self.file_input)
         file_layout.addWidget(self.file_button)
         layout.addLayout(file_layout)
+
 
         # 文件列表表格
         self.table = TableWidget(self)
@@ -189,8 +349,18 @@ class ASRWidget(QWidget):
         self.process_button.setEnabled(False)  # 初始禁用
         layout.addWidget(self.process_button)
 
-        self.setAcceptDrops(True)
+        # self.setAcceptDrops(True)
 
+    def video_checkbox_state_changed(self, state):
+        if state == 2:
+            self.video_par_frame.show()
+        else:
+            self.video_par_frame.hide()
+    def select_img_file(self):
+        """选择图片文件对话框"""
+        file, _ = QFileDialog.getOpenFileName(self, "选择图片文件", "",
+                                                "Image (*.png *.jpg *.jpeg)")
+        self.img_file=file
     def select_file(self):
         """选择文件对话框"""
         files, _ = QFileDialog.getOpenFileNames(self, "选择音频或视频文件", "",
@@ -332,7 +502,7 @@ class ASRWidget(QWidget):
         """处理单个文件"""
         selected_engine = self.combo_box.currentText()
         selected_format = self.format_combo.currentText()
-        worker = ASRWorker(file_path, selected_engine, selected_format)
+        worker = ASRWorker(file_path, selected_engine, selected_format,self)
         worker.signals.finished.connect(self.update_table)
         worker.signals.errno.connect(self.handle_error)
         self.thread_pool.start(worker)
@@ -405,27 +575,27 @@ class ASRWidget(QWidget):
         )
         self.process_button.setEnabled(has_unprocessed)
 
-    def dragEnterEvent(self, event):
-        """拖拽进入事件"""
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        """拖拽释放事件"""
-        supported_formats = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma',  # 音频格式
-                           '.mp4', '.avi', '.mov', '.ts', '.mkv', '.wmv', '.flv', '.webm', '.rmvb')  # 视频格式
-        files = [u.toLocalFile() for u in event.mimeData().urls()]
-        for file in files:
-            if os.path.isdir(file):
-                for root, dirs, files_in_dir in os.walk(file):
-                    for f in files_in_dir:
-                        if f.lower().endswith(supported_formats):
-                            self.add_file_to_table(os.path.join(root, f))
-            elif file.lower().endswith(supported_formats):
-                self.add_file_to_table(file)
-        self.update_start_button_state()
+    # def dragEnterEvent(self, event):
+    #     """拖拽进入事件"""
+    #     if event.mimeData().hasUrls():
+    #         event.accept()
+    #     else:
+    #         event.ignore()
+    #
+    # def dropEvent(self, event):
+    #     """拖拽释放事件"""
+    #     supported_formats = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma',  # 音频格式
+    #                        '.mp4', '.avi', '.mov', '.ts', '.mkv', '.wmv', '.flv', '.webm', '.rmvb')  # 视频格式
+    #     files = [u.toLocalFile() for u in event.mimeData().urls()]
+    #     for file in files:
+    #         if os.path.isdir(file):
+    #             for root, dirs, files_in_dir in os.walk(file):
+    #                 for f in files_in_dir:
+    #                     if f.lower().endswith(supported_formats):
+    #                         self.add_file_to_table(os.path.join(root, f))
+    #         elif file.lower().endswith(supported_formats):
+    #             self.add_file_to_table(file)
+    #     self.update_start_button_state()
 
 
 class InfoWidget(QWidget):
@@ -443,6 +613,10 @@ class InfoWidget(QWidget):
     🖥️ 高颜值界面：基于 PyQt5 和 qfluentwidgets，界面美观且用户友好。
     ⚡ 效率超人：多线程并发 + 批量处理，文字转换快如闪电。
     📄 多格式支持：支持生成 .srt 和 .txt 字幕文件，满足不同需求。
+    原仓库：https://github.com/WEIFENG2333/AsrTools
+    新增功能：
+     1.支持音频+指定图片生成视频文件。
+     2.多线程调整为（核心数-1）
         """
         
         main_layout = QVBoxLayout(self)
@@ -487,9 +661,9 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setExpandWidth(200)
         self.resize(800, 600)
 
-        self.update_checker = UpdateCheckerThread(self)
-        self.update_checker.msg.connect(self.show_msg)
-        self.update_checker.start()
+        # self.update_checker = UpdateCheckerThread(self)
+        # self.update_checker.msg.connect(self.show_msg)
+        # self.update_checker.start()
 
     def show_msg(self, title, content, update_download_url):
         w = MessageBox(title, content, self)
@@ -516,6 +690,60 @@ def video2audio(input_file: str, output: str = "") -> bool:
     ]
     result = subprocess.run(cmd, capture_output=True, check=True, encoding='utf-8', errors='replace')
 
+    if result.returncode == 0 and Path(output).is_file():
+        return True
+    else:
+        return False
+
+def audio2video(video_file:str,audio_file: str,scale:str,rate:int,padding, output: str = "") -> bool:
+    """使用ffmpeg将视频转换为音频"""
+    # 创建output目录
+    if video_file is None:
+        video_file=""
+    output=output.rsplit(".", 1)[0] + '_rate' + str(rate) + '_scale' + scale + ".mp4"
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output = str(output)
+    resize_file = video_file
+    tmp_file=False
+    if video_file =="":
+        supported_formats = ('.png', '.jpg', '.jpeg')
+        files = [audio_file.rsplit(".", 1)[0]+u for u in supported_formats if os.path.isfile(audio_file.rsplit(".", 1)[0]+u)]
+        if len(files)!=0:
+            resize_file = img_resize(files[0], int(scale.split("x")[0]), int(scale.split("x")[1]), 15, padding)
+            tmp_file = True
+        else:
+            resize_file = os.path.join(os.path.dirname(__file__), 'static/100.png')
+    else:
+        # resize_file=video_file.rsplit(".", 1)[0] + '_resize'+ ".png"
+        resize_file=img_resize(video_file, int(scale.split("x")[0]), int(scale.split("x")[1]), 15,padding)
+        tmp_file=True
+
+    # tmp_image = Image.new('RGBA', (100, 100), (0, 0, 0, 0))
+    # video_file = output.rsplit(".", 1)[0] + ".png"
+    # tmp_image.save(video_file)
+
+    cmd = [
+        'ffmpeg',
+        '-loop','1',
+        '-i', resize_file,
+        '-i', audio_file,
+        '-r', str(rate),#帧数
+        '-s', scale,#1280x720  '640x360'
+        '-pix_fmt', 'yuv420p',
+        '-c:v', 'libx264',
+        '-c:a', 'copy',
+        '-shortest',
+        '-y',
+        output
+    ]
+    logging.info(f'cmd:{cmd}')
+    try:
+        result = subprocess.run(cmd, capture_output=True, check=True, encoding='utf-8', errors='replace')
+        if tmp_file:
+            os.unlink(resize_file)
+    except Exception as err:
+        logging.error(str(err))
     if result.returncode == 0 and Path(output).is_file():
         return True
     else:
