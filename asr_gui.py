@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import uuid
 
@@ -19,7 +20,7 @@ from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Sign
 from PyQt5.QtGui import QCursor, QColor, QFont
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
                              QTableWidgetItem, QHeaderView, QSizePolicy, QCheckBox, QFrame)
-from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentIcon as FIF,
+from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentIcon,
                             Action, RoundMenu, InfoBar, InfoBarPosition,
                             FluentWindow, BodyLabel, MessageBox, SpinBox)
 
@@ -112,6 +113,7 @@ class ASRWorker(QRunnable):
             
             # 根据导出格式选择转换方法
             save_ext = self.export_format.lower()
+            result_text=""
             if save_ext == 'srt':
                 result_text = result.to_srt()
             elif save_ext == 'ass':
@@ -143,29 +145,6 @@ class ASRWorker(QRunnable):
         except Exception as e:
             logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
             self.signals.errno.emit(self.file_path, f"处理时出错: {str(e)}")
-
-class UpdateCheckerThread(QThread):
-    msg = pyqtSignal(str, str, str)  # 用于发送消息的信号
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-    def run(self):
-        try:
-            from check_update import check_update, check_internet_connection
-            # 检查互联网连接
-            if not check_internet_connection():
-                self.msg.emit("错误", "无法连接到互联网，请检查网络连接。", "")
-                return
-            # 检查更新
-            config = check_update(self)
-            if config:
-                if config['fource']:
-                    self.msg.emit("更新", "检测到新版本，请下载最新版本。", config['update_download_url'])
-                else:
-                    self.msg.emit("可更新", "检测到新版本，请下载最新版本。", config['update_download_url'])
-        except Exception as e:
-            pass
 
 class MyLineEdit(LineEdit):
     def __init__(self,thatself):
@@ -232,32 +211,46 @@ class ASRWidget(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
+        media2srt=QHBoxLayout()
+        #并发任务数
+        tasks_label = BodyLabel("同时最大任务数:", self)
+        tasks_label.setFixedWidth(120)
+        self.tasks_spin = SpinBox(self)
+        # self.video_par_r_spin.setFixedHeight(35)
+        self.tasks_spin.setRange(1, os.cpu_count()-1)
+        self.tasks_spin.setValue(math.ceil(os.cpu_count()/2))
+        self.tasks_spin.setSingleStep(1)
+        media2srt.addWidget(tasks_label)
+        media2srt.addWidget(self.tasks_spin)
         # ASR引擎选择区域
-        engine_layout = QHBoxLayout()
-        engine_label = BodyLabel("选择接口:", self)
-        engine_label.setFixedWidth(70)
+        # engine_layout = QHBoxLayout()
+        engine_label = BodyLabel("音频转字幕接口:", self)
+        engine_label.setFixedWidth(120)
         self.combo_box = ComboBox(self)
         self.combo_box.addItems(['B 接口', 'J 接口', 'K 接口', 'Whisper'])
-        engine_layout.addWidget(engine_label)
-        engine_layout.addWidget(self.combo_box)
-        layout.addLayout(engine_layout)
-
+        # engine_layout.addWidget(engine_label)
+        # engine_layout.addWidget(self.combo_box)
+        # layout.addLayout(engine_layout)
+        media2srt.addWidget(engine_label)
+        media2srt.addWidget(self.combo_box)
         # 导出格式选择区域 
-        format_layout = QHBoxLayout()
-        format_label = BodyLabel("导出格式:", self)
-        format_label.setFixedWidth(70)
+        # format_layout = QHBoxLayout()
+        format_label = BodyLabel("输出字幕格式:", self)
+        format_label.setFixedWidth(120)
         self.format_combo = ComboBox(self)
         self.format_combo.addItems(['SRT', 'TXT', 'ASS'])
-        format_layout.addWidget(format_label)
-        format_layout.addWidget(self.format_combo)
-        layout.addLayout(format_layout)
-
+        # format_layout.addWidget(format_label)
+        # format_layout.addWidget(self.format_combo)
+        # layout.addLayout(format_layout)
+        media2srt.addWidget(format_label)
+        media2srt.addWidget(self.format_combo)
+        layout.addLayout(media2srt)
         # 是否生成视频选项
         video_check_layout = QHBoxLayout()
         video_check_label = BodyLabel("图片生成视频:", self)
         video_check_label.setFixedWidth(90)
         self.video_checkbox = QCheckBox()
-        self.video_checkbox.setChecked(True)
+        self.video_checkbox.setChecked(False)
         self.video_checkbox.stateChanged.connect(self.video_checkbox_state_changed)
         video_check_layout.addWidget(video_check_label)
         video_check_layout.addWidget(self.video_checkbox)
@@ -320,12 +313,12 @@ class ASRWidget(QWidget):
 
         self.video_par_frame.setLayout(video_par_layout)
         layout.addWidget(self.video_par_frame)
-        # self.video_par_frame.hide()
+        self.video_par_frame.hide()
 
         # 文件选择区域
         file_layout = QHBoxLayout()
         self.file_input = MyLineEdit(self)
-        self.file_input.setPlaceholderText("拖拽文件或文件夹到这里")
+        self.file_input.setPlaceholderText("拖拽视频或音频文件或文件夹到这里")
         self.file_input.setReadOnly(True)
         self.file_button = PushButton("选择文件", self)
         self.file_button.clicked.connect(self.select_file)
@@ -349,12 +342,19 @@ class ASRWidget(QWidget):
         self.table.setColumnWidth(1, 100)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # 处理按钮
+        # 按钮
+        button_layout = QHBoxLayout()
+        self.clear_button = PushButton("清空已完成", self)
+        self.clear_button.clicked.connect(self.deletefiles)
+        self.clear_button.setEnabled(False)  # 初始禁用
+        button_layout.addWidget(self.clear_button)
+
         self.process_button = PushButton("开始处理", self)
         self.process_button.clicked.connect(self.process_files)
         self.process_button.setEnabled(False)  # 初始禁用
-        layout.addWidget(self.process_button)
-
+        # layout.addWidget(self.process_button)
+        button_layout.addWidget(self.process_button)
+        layout.addLayout(button_layout)
         # self.setAcceptDrops(True)
 
     def video_checkbox_state_changed(self, state):
@@ -413,9 +413,9 @@ class ASRWidget(QWidget):
         self.table.selectRow(current_row)
 
         menu = RoundMenu(self)
-        reprocess_action = Action(FIF.SYNC, "重新处理")
-        delete_action = Action(FIF.DELETE, "删除任务")
-        open_dir_action = Action(FIF.FOLDER, "打开文件目录")
+        reprocess_action = Action(FluentIcon.SYNC, "重新处理")
+        delete_action = Action(FluentIcon.DELETE, "删除任务")
+        open_dir_action = Action(FluentIcon.FOLDER, "打开文件目录")
         menu.addActions([reprocess_action, delete_action, open_dir_action])
 
         delete_action.triggered.connect(self.delete_selected_row)
@@ -424,6 +424,24 @@ class ASRWidget(QWidget):
 
         menu.exec(QCursor.pos())
 
+    def deletefiles(self):
+        del_nums=0
+        for row in range(self.table.rowCount()):
+            row=row-del_nums
+            if row >=self.table.rowCount():
+                return
+            if self.table.item(row, 1).text() == "已处理":
+                file_path = self.table.item(row, 0).data(Qt.UserRole)
+                if file_path in self.workers:
+                    worker = self.workers[file_path]
+                    worker.signals.finished.disconnect(self.update_table)
+                    worker.signals.errno.disconnect(self.handle_error)
+                    # QThreadPool 不支持直接终止线程，通常需要设计任务可中断
+                    # 这里仅移除引用
+                    self.workers.pop(file_path, None)
+                self.table.removeRow(row)
+                del_nums=del_nums+1
+        self.update_start_button_state()
     def delete_selected_row(self):
         """删除选中的行"""
         current_row = self.table.currentRow()
@@ -491,6 +509,7 @@ class ASRWidget(QWidget):
 
     def process_files(self):
         """处理所有未处理的文件"""
+        self.thread_pool.setMaxThreadCount(int(self.tasks_spin.value()))
         for row in range(self.table.rowCount()):
             if self.table.item(row, 1).text() == "未处理":
                 file_path = self.table.item(row, 0).data(Qt.UserRole)
@@ -580,7 +599,19 @@ class ASRWidget(QWidget):
             for row in range(self.table.rowCount())
         )
         self.process_button.setEnabled(has_unprocessed)
+        has_processed = any(
+            self.table.item(row, 1).text() == "已处理"
+            for row in range(self.table.rowCount())
+        )
+        self.clear_button.setEnabled(has_processed)
 
+    def update_clear_button_state(self):
+        """根据文件列表更新开始处理按钮的状态"""
+        has_unprocessed = any(
+            self.table.item(row, 1).text() == "已处理"
+            for row in range(self.table.rowCount())
+        )
+        self.clear_button.setEnabled(has_unprocessed)
     # def dragEnterEvent(self, event):
     #     """拖拽进入事件"""
     #     if event.mimeData().hasUrls():
@@ -641,7 +672,7 @@ class InfoWidget(QWidget):
         main_layout.addWidget(desc_label)
 
         github_button = PushButton("GitHub 仓库", self)
-        github_button.setIcon(FIF.GITHUB)
+        github_button.setIcon(FluentIcon.GITHUB)
         github_button.setIconSize(QSize(20, 20))
         github_button.setMinimumHeight(42)
         github_button.clicked.connect(lambda _: webbrowser.open(GITHUB_URL))
@@ -657,12 +688,12 @@ class MainWindow(FluentWindow):
         # ASR 处理界面
         self.asr_widget = ASRWidget()
         self.asr_widget.setObjectName("main")
-        self.addSubInterface(self.asr_widget, FIF.ALBUM, 'ASR Processing')
+        self.addSubInterface(self.asr_widget, FluentIcon.ALBUM, 'ASR Processing')
 
         # 个人信息界面
         self.info_widget = InfoWidget()
         self.info_widget.setObjectName("info")  # 设置对象名称
-        self.addSubInterface(self.info_widget, FIF.GITHUB, 'About')
+        self.addSubInterface(self.info_widget, FluentIcon.GITHUB, 'About')
 
         self.navigationInterface.setExpandWidth(200)
         self.resize(800, 600)
@@ -694,7 +725,7 @@ def video2audio(input_file: str, output: str = "") -> bool:
         '-y',
         output
     ]
-    result = subprocess.run(cmd, capture_output=True, check=True, encoding='utf-8', errors='replace')
+    result = subprocess.run(cmd, capture_output=True, check=True, encoding='utf-8', errors='replace',creationflags=subprocess.CREATE_NO_WINDOW)
 
     if result.returncode == 0 and Path(output).is_file():
         return True
