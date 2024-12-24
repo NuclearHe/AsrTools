@@ -607,7 +607,7 @@ class InfoWidget(QWidget):
 
     def init_ui(self):
         # GitHub URL 和仓库描述
-        GITHUB_URL = "https://github.com/WEIFENG2333/AsrTools"
+        GITHUB_URL = "https://github.com/NuclearHe/AsrTools"
         REPO_DESCRIPTION = """
     🚀 无需复杂配置：无需 GPU 和繁琐的本地配置，小白也能轻松使用。
     🖥️ 高颜值界面：基于 PyQt5 和 qfluentwidgets，界面美观且用户友好。
