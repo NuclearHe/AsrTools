@@ -84,8 +84,9 @@ class ASRWorker(QRunnable):
             # 检查文件类型,如果不是音频则转换
             logging.info("[+]正在进ffmpeg转换")
             audio_exts = ['.mp3', '.wav']
+            temp_audio="default"
             if not any(self.file_path.lower().endswith(ext) for ext in audio_exts):
-                temp_audio = self.file_path.rsplit(".", 1)[0] + ".mp3"
+                temp_audio = self.file_path.rsplit(".", 1)[0] +"_"+str(uuid.uuid4())[:8]+ ".mp3"
                 if not video2audio(self.file_path, temp_audio):
                     raise Exception("音频转换失败，确保安装ffmpeg")
                 self.audio_path = temp_audio
@@ -131,7 +132,12 @@ class ASRWorker(QRunnable):
                     self.ui_self.img_file=""
                 if not audio2video(self.ui_self.img_file,self.audio_path,self.ui_self.video_par_s_combo.currentText(),self.ui_self.video_par_r_spin.value(),float(self.ui_self.video_par_p_spin.value()/100), temp_video):
                     raise Exception("视频合成视频失败，确保安装ffmpeg")
+                if temp_audio != "default":
+                    os.unlink(temp_audio)
                 logging.info(f"完成视频合成: {self.file_path}")
+            else:
+                if temp_audio != "default":
+                    os.unlink(temp_audio)
 
             self.signals.finished.emit(self.file_path, result_text)
         except Exception as e:
